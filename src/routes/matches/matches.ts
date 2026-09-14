@@ -18,6 +18,8 @@ import { generate } from "randomstring";
 
 import Utils from "../../utility/utils.js";
 
+import { validateMapsAgainstSeason } from "../../utility/mapPool.js";
+
 import GameServer from "../../utility/serverrcon.js";
 
 import config from "config";
@@ -488,6 +490,212 @@ router.get("/mymatches", Utils.ensureAuthenticated, async (req, res, next) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: (err as Error).toString() });
+  }
+});
+
+/**
+ * @swagger
+ *
+ * /matches/cast/stream:
+ *   get:
+ *     description: SSE stream of live/finished match data and events, for the caster dashboard.
+ *     produces:
+ *       - text/event-stream
+ *     tags:
+ *       - matches
+ *     responses:
+ *       403:
+ *         $ref: '#/components/responses/Unauthorized'
+ */
+router.get("/cast/stream", Utils.ensureAuthenticated, async (req, res) => {
+  try {
+    if (!req.user || (!Utils.castCheck(req.user) && !Utils.adminCheck(req.user))) {
+      res.status(403).json({ message: "Access reserved to users with the cast role." });
+      return;
+    }
+
+    res.set({
+      "Cache-Control": "no-cache",
+      "Connection": "keep-alive",
+      "Content-Type": "text/event-stream",
+      "X-Accel-Buffering": "no"
+    });
+    res.flushHeaders();
+
+    const sendCastData = async () => {
+      try {
+        const eventSql = `
+          SELECT * FROM (
+            SELECT 'match_created' as event_type, m.id as match_id,
+              COALESCE(m.start_time, NOW()) as event_time,
+              t1.name as team1, t2.name as team2,
+              NULL as map_name, NULL as team1_score, NULL as team2_score,
+              NULL as team1_series, NULL as team2_series
+            FROM \`match\` m
+            JOIN team t1 ON m.team1_id = t1.id
+            JOIN team t2 ON m.team2_id = t2.id
+            WHERE m.cancelled = 0 OR m.cancelled IS NULL
+
+            UNION ALL
+
+            SELECT 'map_end' as event_type, m.id as match_id,
+              ms.end_time as event_time,
+              t1.name as team1, t2.name as team2,
+              ms.map_name, ms.team1_score, ms.team2_score,
+              NULL as team1_series, NULL as team2_series
+            FROM map_stats ms
+            JOIN \`match\` m ON ms.match_id = m.id
+            JOIN team t1 ON m.team1_id = t1.id
+            JOIN team t2 ON m.team2_id = t2.id
+            WHERE ms.end_time IS NOT NULL
+
+            UNION ALL
+
+            SELECT 'match_end' as event_type, m.id as match_id,
+              m.end_time as event_time,
+              t1.name as team1, t2.name as team2,
+              NULL as map_name, NULL as team1_score, NULL as team2_score,
+              COALESCE(m.team1_series_score, m.team1_score, 0) as team1_series,
+              COALESCE(m.team2_series_score, m.team2_score, 0) as team2_series
+            FROM \`match\` m
+            JOIN team t1 ON m.team1_id = t1.id
+            JOIN team t2 ON m.team2_id = t2.id
+            WHERE m.end_time IS NOT NULL AND (m.cancelled = 0 OR m.cancelled IS NULL)
+          ) ev
+          ORDER BY ev.event_time DESC, ev.match_id DESC, ev.event_type ASC
+          LIMIT 200`;
+
+        const activeMatchSql = `
+          SELECT m.id, m.team1_string, m.team2_string, m.team1_series_score, m.team2_series_score,
+            m.max_maps, m.start_time,
+            gs.ip_string, gs.ip_cast, gs.port, gs.gotv_port,
+            ms.map_name, ms.team1_score, ms.team2_score, ms.map_number
+          FROM \`match\` m
+          LEFT JOIN game_server gs ON m.server_id = gs.id
+          LEFT JOIN map_stats ms ON ms.match_id = m.id
+          WHERE m.end_time IS NULL AND (m.cancelled = 0 OR m.cancelled IS NULL)
+          ORDER BY m.id ASC, ms.map_number ASC`;
+
+        const activeVetoSql = `
+          SELECT v.match_id, v.map as map_name, v.id as veto_id
+          FROM veto v
+          JOIN \`match\` m ON m.id = v.match_id
+          WHERE m.end_time IS NULL AND (m.cancelled = 0 OR m.cancelled IS NULL)
+            AND v.pick_or_veto IN ('pick', 'decider')
+          ORDER BY v.match_id ASC, v.id ASC`;
+
+        const finishedMatchSql = `
+          SELECT m.id, m.team1_string, m.team2_string, m.team1_series_score, m.team2_series_score,
+            m.max_maps, m.end_time,
+            ms.map_name, ms.team1_score, ms.team2_score, ms.map_number
+          FROM \`match\` m
+          LEFT JOIN map_stats ms ON ms.match_id = m.id
+          WHERE m.end_time IS NOT NULL AND (m.cancelled = 0 OR m.cancelled IS NULL)
+          ORDER BY m.id DESC, ms.map_number ASC
+          LIMIT 50`;
+
+        const [events, activeRows, vetoRows, finishedRows]: [RowDataPacket[], RowDataPacket[], RowDataPacket[], RowDataPacket[]] =
+          await Promise.all([
+            db.query(eventSql),
+            db.query(activeMatchSql),
+            db.query(activeVetoSql),
+            db.query(finishedMatchSql)
+          ]);
+
+        // Build veto map list per match (ordered picks/deciders).
+        const vetoByMatch: { [key: number]: string[] } = {};
+        for (const vrow of vetoRows) {
+          if (!vetoByMatch[vrow.match_id]) vetoByMatch[vrow.match_id] = [];
+          vetoByMatch[vrow.match_id].push(vrow.map_name);
+        }
+
+        const groupMatchMaps = (rows: RowDataPacket[], withVeto = false) => {
+          const matchMap: { [key: number]: any } = {};
+          for (const row of rows) {
+            if (!matchMap[row.id]) {
+              matchMap[row.id] = {
+                id: row.id,
+                team1_string: row.team1_string,
+                team2_string: row.team2_string,
+                team1_series_score: row.team1_series_score,
+                team2_series_score: row.team2_series_score,
+                max_maps: row.max_maps,
+                start_time: row.start_time,
+                end_time: row.end_time,
+                ip_string: row.ip_string,
+                ip_cast: row.ip_cast,
+                port: row.port,
+                gotv_port: row.gotv_port,
+                maps: []
+              };
+            }
+            if (row.map_name) {
+              matchMap[row.id].maps.push({
+                map: row.map_name,
+                team1_score: row.team1_score,
+                team2_score: row.team2_score,
+                map_number: row.map_number,
+                started: true
+              });
+            }
+          }
+          if (withVeto) {
+            for (const [matchIdStr, mapNames] of Object.entries(vetoByMatch)) {
+              const matchId = Number(matchIdStr);
+              if (!matchMap[matchId]) continue;
+              mapNames.forEach((mapName, idx) => {
+                const inStats = matchMap[matchId].maps.some((m: any) => m.map_number === idx);
+                if (!inStats) {
+                  matchMap[matchId].maps.push({
+                    map: mapName,
+                    team1_score: null,
+                    team2_score: null,
+                    map_number: idx,
+                    started: false
+                  });
+                }
+              });
+              matchMap[matchId].maps.sort((a: any, b: any) => a.map_number - b.map_number);
+            }
+          }
+          return Object.values(matchMap).sort((a: any, b: any) => b.id - a.id);
+        };
+
+        const data = {
+          events: events.map((e) => Object.assign({}, e)),
+          activeMatches: groupMatchMaps(activeRows.map((r) => Object.assign({}, r)), true),
+          finishedMatches: groupMatchMaps(finishedRows.map((r) => Object.assign({}, r)))
+        };
+
+        res.write(`event: castData\ndata: ${JSON.stringify(data)}\n\n`);
+      } catch (err) {
+        console.error("cast/stream sendCastData error:", err);
+      }
+    };
+
+    await sendCastData();
+
+    const onUpdate = async () => { await sendCastData(); };
+    GlobalEmitter.on("matchUpdate", onUpdate);
+    GlobalEmitter.on("mapStatUpdate", onUpdate);
+    GlobalEmitter.on("vetoUpdate", onUpdate);
+
+    req.on("close", () => {
+      GlobalEmitter.removeListener("matchUpdate", onUpdate);
+      GlobalEmitter.removeListener("mapStatUpdate", onUpdate);
+      GlobalEmitter.removeListener("vetoUpdate", onUpdate);
+      res.end();
+    });
+    req.on("disconnect", () => {
+      GlobalEmitter.removeListener("matchUpdate", onUpdate);
+      GlobalEmitter.removeListener("mapStatUpdate", onUpdate);
+      GlobalEmitter.removeListener("vetoUpdate", onUpdate);
+      res.end();
+    });
+  } catch (err) {
+    console.error((err as Error).toString());
+    res.status(500).write(`event: error\ndata: ${(err as Error).toString()}\n\n`);
+    res.end();
   }
 });
 
@@ -1215,6 +1423,24 @@ router.post("/", Utils.ensureAuthenticated, async (req, res, next) => {
       return;
     }
 
+    // A match belonging to a season may only use maps from that season's own map
+    // pool - the creating user's personal map list is never a valid source here.
+    if (req.body[0].season_id != null) {
+      const submittedMaps: string[] = (req.body[0].veto_mappool ?? "")
+        .toString()
+        .trim()
+        .split(/[\s,]+/)
+        .filter(Boolean);
+      const seasonMapError = await validateMapsAgainstSeason(
+        req.body[0].season_id,
+        submittedMaps
+      );
+      if (seasonMapError != null) {
+        res.status(400).json({ message: seasonMapError });
+        return;
+      }
+    }
+
     // DatHost on-the-fly provisioning: require server_id null and DatHost config.
     if (req.body[0].use_dathost) {
       if (req.body[0].server_id != null) {
@@ -1403,6 +1629,7 @@ router.post("/", Utils.ensureAuthenticated, async (req, res, next) => {
         }
       }
     }
+    GlobalEmitter.emit("matchUpdate");
     res.json({
       message: "Match inserted successfully!",
       id: insertMatch.insertId
@@ -1476,8 +1703,33 @@ router.put("/", Utils.ensureAuthenticated, async (req, res, next) => {
       return;
     } else {
       let currentMatchInfo: string =
-        "SELECT id, user_id, server_id, cancelled, forfeit, end_time, api_key, veto_mappool, max_maps, skip_veto, is_pug FROM `match` WHERE id = ?";
+        "SELECT id, user_id, server_id, cancelled, forfeit, end_time, api_key, veto_mappool, max_maps, skip_veto, is_pug, season_id FROM `match` WHERE id = ?";
       const matchRow: RowDataPacket[] = await db.query(currentMatchInfo, req.body[0].match_id);
+
+      // Same season/map-pool guard as match creation - only relevant when
+      // either the season or the map pool is actually being changed.
+      if (req.body[0].season_id !== undefined || req.body[0].veto_mappool !== undefined) {
+        const effectiveSeasonId =
+          req.body[0].season_id !== undefined ? req.body[0].season_id : matchRow[0].season_id;
+        if (effectiveSeasonId != null) {
+          const effectiveMapPool =
+            req.body[0].veto_mappool !== undefined ? req.body[0].veto_mappool : matchRow[0].veto_mappool;
+          const submittedMaps: string[] = (effectiveMapPool ?? "")
+            .toString()
+            .trim()
+            .split(/[\s,]+/)
+            .filter(Boolean);
+          const seasonMapError = await validateMapsAgainstSeason(
+            effectiveSeasonId,
+            submittedMaps
+          );
+          if (seasonMapError != null) {
+            res.status(400).json({ message: seasonMapError });
+            return;
+          }
+        }
+      }
+
       if (req.body[0].server_id != null) {
         // Check if server is owned, public, or in use by another match.
         let serverCheckSql: string =

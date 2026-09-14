@@ -6,6 +6,7 @@ import { Get5_OnMapPicked } from "../types/series_flow/veto/Get5_OnMapPicked.js"
 import { Get5_OnSidePicked } from "../types/series_flow/veto/Get5_OnSidePicked.js";
 import { Get5_OnBackupRestore } from "../types/series_flow/Get5_OnBackupRestore.js";
 import { Get5_OnMapResult } from "../types/series_flow/Get5_OnMapResult.js";
+import { REG_ROUNDS, OT_LEN } from "./mapflowservices.js";
 import GlobalEmitter from "../utility/emitter.js";
 import { RowDataPacket } from "mysql2";
 import { Response } from "express";
@@ -142,7 +143,13 @@ class SeriesFlowService {
       }
       updateStmt = {
         end_time: mapEndTime,
-        winner: winnerId
+        winner: winnerId,
+        team1_score: event.team1.score,
+        team1_score_ct: event.team1.score_ct,
+        team1_score_t: event.team1.score_t,
+        team2_score: event.team2.score,
+        team2_score_ct: event.team2.score_ct,
+        team2_score_t: event.team2.score_t
       };
 
       sqlString = "UPDATE map_stats SET ? WHERE id = ?";
@@ -302,6 +309,30 @@ class SeriesFlowService {
     sqlString =
       "UPDATE `map_stats` SET round_restored = 1 WHERE match_id = ? AND map_number = ?";
     await db.query(sqlString, [event.matchid, event.map_number]);
+
+    // Round-by-round history and OT tracking must also roll back to the
+    // restored round, otherwise map_round/map_stats_ot keep rows for rounds
+    // that are about to be replayed (and get re-created by OnRoundEnd).
+    const mapStatRows: RowDataPacket[] = await db.query(
+      "SELECT id FROM map_stats WHERE match_id = ? AND map_number = ?",
+      [event.matchid, event.map_number]
+    );
+    if (mapStatRows.length) {
+      const mapStatsId = mapStatRows[0].id;
+      await db.query(
+        "DELETE FROM map_round WHERE map_stats_id = ? AND round_number >= ?",
+        [mapStatsId, event.round_number]
+      );
+      if (event.round_number > REG_ROUNDS) {
+        const otNum = Math.ceil((event.round_number - REG_ROUNDS) / OT_LEN);
+        await db.query(
+          "DELETE FROM map_stats_ot WHERE map_stats_id = ? AND ot_number > ?",
+          [mapStatsId, otNum]
+        );
+      } else {
+        await db.query("DELETE FROM map_stats_ot WHERE map_stats_id = ?", [mapStatsId]);
+      }
+    }
     return res.status(200).send({ message: "Success" });
   }
 

@@ -25,6 +25,12 @@ import { Get5_OnBombEvent } from "../types/map_flow/Get5_OnBombEvent.js";
 import { Get5_OnRoundEnd } from "../types/map_flow/Get5_OnRoundEnd.js";
 import { Get5_OnRoundStart } from "../types/map_flow/Get5_OnRoundStart.js";
 
+// Regulation length (MR12, 24 rounds) and rounds per overtime half (MR3) used
+// to snapshot the regulation score and track per-OT score deltas in
+// OnRoundEnd below.
+export const REG_ROUNDS = 24;
+export const OT_LEN = 6;
+
 /**
  * @class
  * Map flow service class for live games.
@@ -142,6 +148,7 @@ class MapFlowService {
         bomb: event.bomb,
         headshot: event.headshot,
         thru_smoke: event.thru_smoke,
+        penetrated: event.penetrated,
         attacker_blind: event.attacker_blind,
         no_scope: event.no_scope,
         suicide: event.suicide,
@@ -249,8 +256,11 @@ class MapFlowService {
     res: Response
   ) {
     try {
+      // Query current map_stats INCLUDING scores BEFORE this round's update -
+      // the pre-update scores are needed as the OT baseline below.
       let sqlString: string =
-        "SELECT id FROM map_stats WHERE match_id = ? AND map_number = ?";
+        "SELECT id, team1_score_ct, team1_score_t, team2_score_ct, team2_score_t, team1_first_side " +
+        "FROM map_stats WHERE match_id = ? AND map_number = ?";
       let insUpdStatement: object;
       let mapStatInfo: RowDataPacket[];
       let playerStats: RowDataPacket[];
@@ -266,6 +276,19 @@ class MapFlowService {
         event.matchid,
         mapStatInfo[0]?.id
       ]);
+
+      // team1_first_side is never sent to us directly - persist it the first
+      // time we see this map's first round end, so later rounds/OTs (and the
+      // fallback side computation below) have a real value instead of always
+      // defaulting to "CT".
+      let team1FirstSide: string | null = mapStatInfo[0]?.team1_first_side ?? null;
+      if (!team1FirstSide && event.round_number === 1) {
+        team1FirstSide = (event.team1.side ?? event.team1.starting_side ?? "CT").toUpperCase();
+        await db.query(
+          "UPDATE map_stats SET team1_first_side = ? WHERE id = ?",
+          [team1FirstSide, mapStatInfo[0].id]
+        );
+      }
       for (let player of event.team1.players) {
         singlePlayerStat = playerStats.filter(
           (dbPlayer) => dbPlayer.steam_id == player.steamid
@@ -291,12 +314,153 @@ class MapFlowService {
         );
       }
       GlobalEmitter.emit("playerStatsUpdate");
-      
+
+      // Regulation score snapshot (end of round 24).
+      if (event.round_number === REG_ROUNDS) {
+        await db.query(
+          "UPDATE map_stats SET team1_reg_score_ct=?, team1_reg_score_t=?, team2_reg_score_ct=?, team2_reg_score_t=? WHERE id=?",
+          [
+            event.team1.score_ct, event.team1.score_t,
+            event.team2.score_ct, event.team2.score_t,
+            mapStatInfo[0].id
+          ]
+        );
+      }
+
+      // Overtime tracking: one map_stats_ot row per OT, storing the score
+      // delta from that OT's start (the cumulative score at OT start is kept
+      // as the offset_* baseline).
+      if (event.round_number > REG_ROUNDS) {
+        const otNum = Math.ceil((event.round_number - REG_ROUNDS) / OT_LEN);
+        const isFirstOtRound = (event.round_number - REG_ROUNDS - 1) % OT_LEN === 0;
+
+        if (isFirstOtRound) {
+          await db.query(
+            `INSERT INTO map_stats_ot
+               (map_stats_id, ot_number, team1_first_side,
+                team1_score_ct, team1_score_t, team2_score_ct, team2_score_t,
+                offset_t1_ct, offset_t1_t, offset_t2_ct, offset_t2_t)
+             VALUES (?, ?, ?, 0, 0, 0, 0, ?, ?, ?, ?)
+             ON DUPLICATE KEY UPDATE team1_first_side = VALUES(team1_first_side)`,
+            [
+              mapStatInfo[0].id, otNum,
+              // The side the team is actually on when this OT starts, not
+              // the side it started the whole map with.
+              event.team1.side?.toUpperCase() ?? null,
+              mapStatInfo[0].team1_score_ct, mapStatInfo[0].team1_score_t,
+              mapStatInfo[0].team2_score_ct, mapStatInfo[0].team2_score_t
+            ]
+          );
+        }
+
+        const otRow: RowDataPacket[] = await db.query(
+          "SELECT offset_t1_ct, offset_t1_t, offset_t2_ct, offset_t2_t FROM map_stats_ot WHERE map_stats_id = ? AND ot_number = ?",
+          [mapStatInfo[0].id, otNum]
+        );
+        if (otRow.length) {
+          await db.query(
+            `UPDATE map_stats_ot SET team1_score_ct=?, team1_score_t=?, team2_score_ct=?, team2_score_t=?
+             WHERE map_stats_id=? AND ot_number=?`,
+            [
+              event.team1.score_ct - otRow[0].offset_t1_ct,
+              event.team1.score_t  - otRow[0].offset_t1_t,
+              event.team2.score_ct - otRow[0].offset_t2_ct,
+              event.team2.score_t  - otRow[0].offset_t2_t,
+              mapStatInfo[0].id, otNum
+            ]
+          );
+        }
+      }
+
+      // Round history: one map_round row per round, with winner/side/reason
+      // normalized to human-readable values.
+      if (event.winner?.team && event.winner?.side) {
+        // Matchzy may send a raw CsTeam int ("2"=T, "3"=CT) for winner.side
+        // depending on plugin version - normalize either form to CT/T.
+        const rawSide = String(event.winner.side);
+        const winnerSide = rawSide === "3" ? "CT"
+                         : rawSide === "2" ? "T"
+                         : rawSide.toUpperCase() === "COUNTERTERRORIST" ? "CT"
+                         : rawSide.toUpperCase() === "TERRORIST" ? "T"
+                         : rawSide;
+
+        // Translate the CS2 RoundEndReason enum (CounterStrikeSharp) to a
+        // human-readable string for storage/display.
+        const ROUND_END_REASONS: Record<number, string> = {
+          0:  "unknown",
+          1:  "target_bombed",
+          4:  "terrorists_escaped",
+          5:  "cts_prevent_escape",
+          6:  "terrorists_neutralized",
+          7:  "bomb_defused",
+          8:  "ct_win",
+          9:  "t_win",
+          10: "draw",
+          11: "hostages_rescued",
+          12: "target_saved",
+          13: "hostages_not_rescued",
+          14: "terrorists_not_escaped",
+          16: "game_commencing",
+          17: "t_surrender",
+          18: "ct_surrender",
+          19: "t_planted",
+          20: "cts_reached_hostage",
+          21: "survival_win",
+          22: "survival_draw",
+        };
+        const reasonStr = ROUND_END_REASONS[event.reason] ?? String(event.reason);
+
+        // team1_side: prefer the value sent by Matchzy, falling back to a
+        // computation from team1_first_side + round_number (with an OT
+        // half-swap) if starting_side wasn't sent.
+        let team1Side: string | null = event.team1.starting_side ?? null;
+        if (!team1Side) {
+          const firstSide = (team1FirstSide ?? "CT").toUpperCase();
+          const rn = event.round_number;
+          if (rn <= 12) {
+            team1Side = firstSide;
+          } else if (rn <= 24) {
+            team1Side = firstSide === "CT" ? "T" : "CT";
+          } else {
+            const otHalf = Math.floor((rn - 25) / 3) % 2;
+            const otStart = firstSide === "CT" ? "T" : "CT";
+            team1Side = otHalf === 0 ? otStart : (otStart === "CT" ? "T" : "CT");
+          }
+        }
+
+        await db.query(
+          `INSERT INTO map_round
+             (map_stats_id, round_number, winner_team, winner_side, reason, t1_score, t2_score, team1_side)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+           ON DUPLICATE KEY UPDATE
+             winner_team = VALUES(winner_team),
+             winner_side = VALUES(winner_side),
+             reason      = VALUES(reason),
+             t1_score    = VALUES(t1_score),
+             t2_score    = VALUES(t2_score),
+             team1_side  = VALUES(team1_side)`,
+          [
+            mapStatInfo[0].id,
+            event.round_number,
+            event.winner.team,
+            winnerSide,
+            reasonStr,
+            event.team1.score,
+            event.team2.score,
+            team1Side
+          ]
+        );
+      }
+
       // Update map stats.
       sqlString = "UPDATE map_stats SET ? WHERE id = ?";
       insUpdStatement = {
         team1_score: event.team1.score,
-        team2_score: event.team2.score
+        team1_score_ct: event.team1.score_ct,
+        team1_score_t: event.team1.score_t,
+        team2_score: event.team2.score,
+        team2_score_ct: event.team2.score_ct,
+        team2_score_t: event.team2.score_t
       }
       await db.query(sqlString, [insUpdStatement, mapStatInfo[0].id]);
       GlobalEmitter.emit("mapStatUpdate");

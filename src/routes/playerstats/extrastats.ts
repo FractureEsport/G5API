@@ -182,14 +182,13 @@ import { Response } from "express-serve-static-core";
  router.get("/:steam_id", async (req, res, next) => {
   try {
     let steamID: string = req.params.steam_id;
-    let sql: string = "SELECT id FROM player_stats WHERE steam_id = ?"
-    let extraSql: string = "SELECT * FROM player_stat_extras where id IN (?)";
-    const playerIds: RowDataPacket[] = await db.query(sql, [steamID]);
-    if (!playerIds.length) {
-      res.status(404).json({ message: "No stats found for player " + steamID });
-      return;
-    }
-    const extrastats: RowDataPacket[] = await db.query(extraSql, [playerIds]);
+    // NOTE: previously joined on `player_stats.id IN (...)` against
+    // `player_stat_extras.id`, two unrelated primary keys - that matched
+    // arbitrary rows rather than this player's own kills/deaths/assists.
+    // Match directly on the steam ids player_stat_extras actually records.
+    let extraSql: string =
+      "SELECT * FROM player_stat_extras WHERE attacker_steam_id = ? OR player_steam_id = ? OR assister_steam_id = ?";
+    const extrastats: RowDataPacket[] = await db.query(extraSql, [steamID, steamID, steamID]);
     if (!extrastats.length) {
       res.status(404).json({ message: "No extra stats found for player " + steamID });
       return;
@@ -803,33 +802,34 @@ router.delete("/", async (req, res, next) => {
 * @param {object} [res] - The response to send back to the client.
 */
 const getIdFromMatches = async (steamId: string, isPug: boolean | number, seasonId: number | null, res: Response<any, Record<string, any>, number>) => {
-    let pugSql: string = 
-      `SELECT id
-        FROM player_stats 
-        WHERE steam_id = ?
-        AND match_id IN (
-        SELECT id FROM \`match\`
+    let matchSql: string =
+      `SELECT id FROM \`match\`
         WHERE cancelled = 0
-        AND is_pug = ?
-      )`;
+        AND is_pug = ?`;
+    let matchParams: (string | number | boolean | null)[] = [isPug];
     if (seasonId) {
-      pugSql = 
-      `SELECT id
-      FROM player_stats 
-      WHERE steam_id = ?
-      AND match_id IN (
-        SELECT id FROM \`match\`
+      matchSql =
+      `SELECT id FROM \`match\`
         WHERE cancelled = 0
-        AND season_id = ?
-      )`;
+        AND season_id = ?`;
+      matchParams = [seasonId];
     }
-    let playerIds: RowDataPacket[] = await db.query(pugSql, [steamId, isPug, seasonId]);
-    let extraSql: string = "SELECT * FROM player_stat_extras where id IN (?)";
-    if (!playerIds.length) {
+    const matchIds: RowDataPacket[] = await db.query(matchSql, matchParams);
+    if (!matchIds.length) {
       res.status(404).json({ message: "No stats found for player " + steamId });
       return;
     }
-    const extrastats: RowDataPacket[] = await db.query(extraSql, [playerIds]);
+    // NOTE: previously joined on player_stats.id against player_stat_extras.id,
+    // two unrelated primary keys - match on the actual steam ids
+    // player_stat_extras records, scoped to this set of matches.
+    let extraSql: string =
+      "SELECT * FROM player_stat_extras WHERE match_id IN (?) AND (attacker_steam_id = ? OR player_steam_id = ? OR assister_steam_id = ?)";
+    const extrastats: RowDataPacket[] = await db.query(extraSql, [
+      matchIds.map((m) => m.id),
+      steamId,
+      steamId,
+      steamId
+    ]);
     if (!extrastats.length) {
       res.status(404).json({ message: "No extra stats found for player " + steamId });
       return;

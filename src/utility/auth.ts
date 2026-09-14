@@ -113,6 +113,7 @@ async function returnStrategy(identifier: any, profile: any, done: any) {
         name: profile.displayName,
         super_admin: isSuperAdmin,
         admin: isAdmin,
+        cast: curUser[0].cast,
         id: curUser[0].id,
         small_image: profile.photos[0].value,
         medium_image: profile.photos[1].value,
@@ -149,6 +150,7 @@ passport.use('local-login', new LocalStrategy(async (username, password, done) =
           name: curUser[0].name,
           admin: curUser[0].admin,
           super_admin: curUser[0].super_admin,
+          cast: curUser[0].cast,
           id: curUser[0].id,
           small_image: curUser[0].small_image,
           medium_image: curUser[0].medium_image,
@@ -222,6 +224,7 @@ passport.use('local-register',
           name: curUser[0].name,
           admin: curUser[0].admin,
           super_admin: curUser[0].super_admin,
+          cast: curUser[0].cast,
           id: curUser[0].id,
           small_image: curUser[0].small_image,
           medium_image: curUser[0].medium_image,
@@ -232,7 +235,7 @@ passport.use('local-register',
     } catch (e) {
       console.error(e);
     }
-    return done(null, undefined, 
+    return done(null, undefined,
       {message: "Unknown error. Please ensure the steam ID is not already in use."});
   })));
 

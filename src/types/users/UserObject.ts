@@ -3,6 +3,7 @@ export interface UserObject {
     name?: string,
     admin?: number,
     super_admin?: number,
+    cast?: number,
     small_image?: string,
     medium_image?: string,
     large_image?: string,
