@@ -18,7 +18,7 @@ import { generate } from "randomstring";
 
 import Utils from "../../utility/utils.js";
 
-import { validateMapsAgainstSeason } from "../../utility/mapPool.js";
+import { validateMapsAgainstSeason, getSeasonMapNames } from "../../utility/mapPool.js";
 
 import GameServer from "../../utility/serverrcon.js";
 
@@ -567,7 +567,7 @@ router.get("/cast/stream", Utils.ensureAuthenticated, async (req, res) => {
 
         const activeMatchSql = `
           SELECT m.id, m.team1_string, m.team2_string, m.team1_series_score, m.team2_series_score,
-            m.max_maps, m.start_time,
+            m.max_maps, m.start_time, m.season_id,
             gs.ip_string, gs.ip_cast, gs.port, gs.gotv_port,
             ms.map_name, ms.team1_score, ms.team2_score, ms.map_number
           FROM \`match\` m
@@ -586,7 +586,7 @@ router.get("/cast/stream", Utils.ensureAuthenticated, async (req, res) => {
 
         const finishedMatchSql = `
           SELECT m.id, m.team1_string, m.team2_string, m.team1_series_score, m.team2_series_score,
-            m.max_maps, m.end_time,
+            m.max_maps, m.end_time, m.season_id,
             ms.map_name, ms.team1_score, ms.team2_score, ms.map_number
           FROM \`match\` m
           LEFT JOIN map_stats ms ON ms.match_id = m.id
@@ -609,6 +609,21 @@ router.get("/cast/stream", Utils.ensureAuthenticated, async (req, res) => {
           vetoByMatch[vrow.match_id].push(vrow.map_name);
         }
 
+        // One season_id -> map_pool_names lookup per distinct season across both
+        // active and finished matches, so CastView can resolve a Workshop map's
+        // custom display name the same way the season editor and match creation do.
+        const seasonIds = [...new Set(
+          [...activeRows, ...finishedRows]
+            .map((r) => r.season_id)
+            .filter((id) => id != null)
+        )];
+        const seasonMapNamesById: { [key: number]: Record<string, string> } = {};
+        await Promise.all(
+          seasonIds.map(async (seasonId) => {
+            seasonMapNamesById[seasonId] = await getSeasonMapNames(seasonId);
+          })
+        );
+
         const groupMatchMaps = (rows: RowDataPacket[], withVeto = false) => {
           const matchMap: { [key: number]: any } = {};
           for (const row of rows) {
@@ -626,6 +641,7 @@ router.get("/cast/stream", Utils.ensureAuthenticated, async (req, res) => {
                 ip_cast: row.ip_cast,
                 port: row.port,
                 gotv_port: row.gotv_port,
+                map_display_names: row.season_id != null ? seasonMapNamesById[row.season_id] : {},
                 maps: []
               };
             }
@@ -1352,6 +1368,14 @@ router.get("/:match_id/config", async (req, res, next) => {
     matchJSON.num_maps = parseInt(matchInfo[0].max_maps);
     if (matchJSON.skip_veto && matchInfo[0].map_sides)
       matchJSON.map_sides = matchInfo[0].map_sides.split(",");
+    // Custom display names (e.g. for Workshop maps) the season configured for its map
+    // pool - lets MatchZy show a readable name in veto/side-pick chat instead of a bare
+    // Workshop id. Only ever affects chat text on MatchZy's side, never which map is
+    // actually loaded.
+    const seasonMapNames = await getSeasonMapNames(matchInfo[0].season_id);
+    if (Object.keys(seasonMapNames).length) {
+      matchJSON.maps_display_names = seasonMapNames;
+    }
     sql = "SELECT * FROM team WHERE id = ?";
     const team1Data: RowDataPacket[] = await db.query(sql, [matchInfo[0].team1_id]) as any;
     const team2Data: RowDataPacket[] = await db.query(sql, [matchInfo[0].team2_id]) as any;
