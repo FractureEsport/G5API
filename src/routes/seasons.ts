@@ -212,8 +212,9 @@ router.get(
     let sql: string;
     let seasons: RowDataPacket[];
     try {
-      // Check if super admin, if they are use this query.
-      if (req.user && Utils.superAdminCheck(req.user)) {
+      // Admins (and super admins) can create a match under any season, not just
+      // ones they personally created, so they need to see all of them here.
+      if (req.user && Utils.adminCheck(req.user)) {
         sql =
           "SELECT s.id, s.user_id, s.name, s.start_date, s.end_date " +
           "FROM season s " +

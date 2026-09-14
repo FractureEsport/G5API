@@ -1600,6 +1600,13 @@ router.post("/", Utils.ensureAuthenticated, async (req, res, next) => {
         ]);
       }
     }
+    // The match creator can always spectate/GOTV their own match, even when they
+    // aren't a player on either team.
+    if (req.user?.steam_id) {
+      sql =
+        "INSERT match_spectator (match_id, auth, spectator_name) VALUES (?,?,?)";
+      await db.query(sql, [insertMatch.insertId, req.user.steam_id, req.user.name]);
+    }
 
     if (req.body[0].match_cvars != null) {
       let cvarInsertSet: Array<Object> = req.body[0].match_cvars;
