@@ -4,10 +4,15 @@ on:
   push:
     branches:
       - master
+      - dev
     tags:
       # Release tags, e.g. V2.3.0.0. The leading V is stripped from image tags.
       - '[Vv][0-9]+.[0-9]+.[0-9]+.[0-9]+'
       - '[Vv][0-9]+.[0-9]+.[0-9]+'
+  # dev/PR builds land on :next as a preview - build it on every PR update too,
+  # not just once dev has already merged it.
+  pull_request:
+    types: [opened, synchronize, reopened]
   # Publishing a release from the GitHub UI against a tag that already exists
   # creates no new ref, so it fires no push event. This trigger is what makes
   # the UI flow work.
@@ -24,6 +29,10 @@ jobs:
   push:
     name: Create build and push to GHCR
     runs-on: ubuntu-latest
+    # A PR from a fork gets a read-only GITHUB_TOKEN, so login/push would just
+    # fail - skip it rather than fail the check. :next still gets rebuilt off
+    # dev, and off any PR opened from a branch in this repo.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     permissions:
       # packages: publish the image. contents: create the release on a tag.
       packages: write
@@ -55,9 +64,10 @@ jobs:
       - id: version
         if: startsWith(github.ref, 'refs/tags/')
         run: echo "number=${GITHUB_REF_NAME#[Vv]}" >> "$GITHUB_OUTPUT"
-      # Every push to master publishes :next -- the rolling build, which is
-      # master plus whatever dependency and security updates have landed.
-      - name: Push :next (master)
+      # A push to master publishes :latest directly - master is always the
+      # stable, released state of the code, so it owns :latest without
+      # waiting on a version tag.
+      - name: Push :latest (master)
         uses: docker/build-push-action@v6
         if: github.ref == 'refs/heads/master'
         with:
@@ -68,9 +78,25 @@ jobs:
           provenance: false
           sbom: false
           tags: |
+            ghcr.io/${{ steps.string.outputs.lowercase }}/g5api:latest
+      # dev and PR builds publish :next -- the rolling preview build. PRs get
+      # amd64-only so review builds stay fast; dev keeps the full platform
+      # matrix since it's what people actually pull to test on real hardware.
+      - name: Push :next (dev / PR)
+        uses: docker/build-push-action@v6
+        if: github.ref == 'refs/heads/dev' || github.event_name == 'pull_request'
+        with:
+          context: .
+          file: Dockerfile
+          platforms: ${{ github.event_name == 'pull_request' && 'linux/amd64' || 'linux/amd64,linux/arm/v7,linux/arm64/v8' }}
+          push: true
+          provenance: false
+          sbom: false
+          tags: |
             ghcr.io/${{ steps.string.outputs.lowercase }}/g5api:next
-      # A release tag publishes the version and moves :latest onto it.
-      - name: Push :latest and :<version> (tag)
+      # A release tag publishes just the version - :latest already tracks
+      # master, which is what every tag is cut from.
+      - name: Push :<version> (tag)
         uses: docker/build-push-action@v6
         if: startsWith(github.ref, 'refs/tags/')
         with:
@@ -81,7 +107,7 @@ jobs:
           provenance: false
           sbom: false
           tags: |
-            ghcr.io/${{ steps.string.outputs.lowercase }}/g5api:latest,ghcr.io/${{ steps.string.outputs.lowercase }}/g5api:${{ steps.version.outputs.number }}
+            ghcr.io/${{ steps.string.outputs.lowercase }}/g5api:${{ steps.version.outputs.number }}
       # Pull this version's section out of CHANGELOG.md to use as release notes.
       # Runs after the image push so a failed build never produces a release.
       - name: Extract release notes from CHANGELOG

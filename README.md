@@ -79,8 +79,6 @@ docker container run --name g5api \
 -e DATABASE="" \
 -e SQLHOST="" \
 -e SQLPORT="" \
--e ADMINS="" \
--e SUPERADMINS="" \
 -e REDISURL="" \
 -e REDISTTL="" \
 -e USEREDIS="true" \

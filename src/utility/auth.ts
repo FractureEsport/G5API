@@ -23,6 +23,16 @@ passport.deserializeUser((obj: User, done) => {
   done(null, obj as any);
 });
 
+// Admin/super_admin/cast are managed entirely from the `user` table from here
+// on (via the user management page) - there is no environment-variable list
+// of steam ids anymore. The one exception is the very first account ever
+// created on an instance: with no admin to grant them anything, it is made
+// super admin automatically so the instance isn't stuck with zero admins.
+async function isFirstUser(): Promise<boolean> {
+  const rows = await db.query("SELECT COUNT(*) as count FROM user");
+  return Number(rows[0]?.count ?? 0) === 0;
+}
+
 function strategyForEnvironment() {
   let strategy: any;
   switch (process.env.NODE_ENV) {
@@ -50,19 +60,12 @@ async function returnStrategy(identifier: any, profile: any, done: any) {
   process.nextTick(async () => {
     profile.identifier = identifier;
     try {
-      let isAdmin = 0;
-      let isSuperAdmin = 0;
-      let superAdminList = (config.get("super_admins.steam_ids") as String).split(",");
-      let adminList = (config.get("admins.steam_ids") as String).split(",");
       let sql = "SELECT * FROM user WHERE steam_id = ?";
-      // If we are an admin, check!
-      if (superAdminList.indexOf(profile.id!.toString()) >= 0) {
-        isSuperAdmin = 1;
-      } else if (adminList.indexOf(profile.id!.toString()) >= 0) {
-        isAdmin = 1;
-      }
       let curUser = await db.query(sql, profile.id);
       if (curUser.length < 1) {
+        // First user on the instance becomes super admin automatically;
+        // everyone after that starts as a regular user.
+        const isSuperAdmin = (await isFirstUser()) ? 1 : 0;
         //Generate API key in user session to allow posting/getting/etc with
         //an account that's not in a session.
         let apiKey = generate({
@@ -73,7 +76,7 @@ async function returnStrategy(identifier: any, profile: any, done: any) {
         let newUser = {
           steam_id: profile.id,
           name: profile.displayName,
-          admin: isAdmin,
+          admin: 0,
           super_admin: isSuperAdmin,
           created_at: new Date().toISOString().slice(0, 19).replace("T", " "),
           small_image: profile.photos[0].value,
@@ -89,12 +92,12 @@ async function returnStrategy(identifier: any, profile: any, done: any) {
         sql = "INSERT INTO map_list (map_name, map_display_name, user_id) VALUES ?";
         await db.query(sql, [defaultMaps]);
       } else {
+        // Role (admin/super_admin/cast) is managed entirely from the database
+        // from here on - only refresh the avatar images on login.
         let updateUser = {
           small_image: profile.photos[0].value,
           medium_image: profile.photos[1].value,
           large_image: profile.photos[2].value,
-          super_admin: isSuperAdmin,
-          admin: isAdmin
         };
         sql = "UPDATE user SET ? WHERE steam_id=?";
         await db.query(sql, [updateUser, profile.id]);
@@ -111,8 +114,8 @@ async function returnStrategy(identifier: any, profile: any, done: any) {
       return done(null, {
         steam_id: profile.id,
         name: profile.displayName,
-        super_admin: isSuperAdmin,
-        admin: isAdmin,
+        super_admin: curUser[0].super_admin,
+        admin: curUser[0].admin,
         cast: curUser[0].cast,
         id: curUser[0].id,
         small_image: profile.photos[0].value,
@@ -176,9 +179,6 @@ passport.use('local-register',
         return done(null, false, {message: "Sorry, local logins are disabled for this instance."});
       }
       let sql = "SELECT * FROM user WHERE username = ? OR steam_id = ?";
-      let superAdminList = (config.get("super_admins.steam_ids") as String).split(",");
-      let adminList = (config.get("admins.steam_ids") as String).split(",");
-      let isAdmin, isSuperAdmin = 0;
       if (!req.body.steam_id) {
         return done(null, false, {message: "Steam ID was not provided"});
       }
@@ -190,11 +190,9 @@ passport.use('local-register',
         if(await Utils.convertToSteam64(req.body.steam_id) == "") {
           return done(null, false, {message: "Not a valid Steam64 ID."});
         }
-        if (superAdminList.indexOf(req.body.steam_id) >= 0) {
-          isSuperAdmin = 1;
-        } else if (adminList.indexOf(req.body.steam_id) >= 0) {
-          isAdmin = 1;
-        }
+        // First user on the instance becomes super admin automatically;
+        // everyone after that starts as a regular user.
+        const isSuperAdmin = (await isFirstUser()) ? 1 : 0;
         let apiKey = generate({
           length: 64,
           capitalization: "uppercase",
@@ -204,7 +202,7 @@ passport.use('local-register',
         let newUser: Object = {
           steam_id: req.body.steam_id,
           name: steamName!,
-          admin: isAdmin,
+          admin: 0,
           super_admin: isSuperAdmin,
           created_at: new Date().toISOString().slice(0, 19).replace("T", " "),
           api_key: Utils.encrypt(apiKey),
