@@ -375,6 +375,12 @@ router.get("/:season_id", async (req, res, next) => {
  *         $ref: '#/components/responses/Error'
  */
 router.post("/", Utils.ensureAuthenticated, async (req, res, next) => {
+  if (req.user!.admin == 1 && !Utils.superAdminCheck(req.user!)) {
+    res
+      .status(403)
+      .json({ message: "Admins are not allowed to create seasons." });
+    return;
+  }
   try {
     let defaultCvar: any = req.body[0].season_cvar;
     let insertSet: SeasonObject | SeasonCvarObject = {
@@ -454,6 +460,15 @@ router.put("/", Utils.ensureAuthenticated, async (req, res, next) => {
   const seasonRow: RowDataPacket[] = await db.query(seasonUserId, [req.body[0].season_id]);
   if (!seasonRow.length) {
     res.status(404).json({ message: "No season found." });
+    return;
+  } else if (
+    req.user &&
+    req.user.admin == 1 &&
+    !Utils.superAdminCheck(req.user)
+  ) {
+    res
+      .status(403)
+      .json({ message: "Admins are not allowed to modify seasons." });
     return;
   } else if (
     req.user &&
@@ -550,6 +565,15 @@ router.delete("/", async (req, res, next) => {
   const seasonRow: RowDataPacket[] = await db.query(seasonUserId, req.body[0].season_id);
   if (seasonRow[0] == null) {
     res.status(404).json({ message: "No season found." });
+    return;
+  } else if (
+    req.user &&
+    req.user.admin == 1 &&
+    !Utils.superAdminCheck(req.user)
+  ) {
+    res
+      .status(403)
+      .json({ message: "Admins are not allowed to delete seasons." });
     return;
   } else if (
     req.user &&

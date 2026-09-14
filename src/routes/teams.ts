@@ -340,6 +340,12 @@ router.get("/:team_id/basic", async (req, res) => {
  *         $ref: '#/components/responses/Error'
  */
 router.post("/", Utils.ensureAuthenticated, async (req, res) => {
+  if (req.user!.admin == 1 && !Utils.superAdminCheck(req.user!)) {
+    res
+      .status(403)
+      .json({ message: "Admins are not allowed to create teams." });
+    return;
+  }
   let userID: number = req.user!.id;
   let teamName: string = req.body[0].name;
   let flag: string = req.body[0].flag;
@@ -467,6 +473,15 @@ router.put("/", Utils.ensureAuthenticated, async (req, res) => {
   const checkUser: RowDataPacket[] = await db.query(checkUserSql, [req.body[0].id]);
   if (checkUser[0] == null) {
     res.status(404).json({ message: "Team does not exist." });
+    return;
+  } else if (
+    req.user &&
+    req.user.admin == 1 &&
+    !Utils.superAdminCheck(req.user)
+  ) {
+    res
+      .status(403)
+      .json({ message: "Admins are not allowed to modify teams." });
     return;
   } else if (
     req.user &&
@@ -619,6 +634,15 @@ router.delete("/", Utils.ensureAuthenticated, async (req, res) => {
   const checkUser: RowDataPacket[] = await db.query(checkUserSql, [teamID]);
   if (checkUser[0] == null) {
     res.status(404).json({ message: "Team does not exist." });
+    return;
+  } else if (
+    req.user &&
+    req.user.admin == 1 &&
+    !Utils.superAdminCheck(req.user)
+  ) {
+    res
+      .status(403)
+      .json({ message: "Admins are not allowed to delete teams." });
     return;
   } else if (
     req.user &&
