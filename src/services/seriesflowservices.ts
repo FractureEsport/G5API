@@ -12,6 +12,7 @@ import { RowDataPacket } from "mysql2";
 import { Response } from "express";
 import Utils from "../utility/utils.js";
 import update_challonge_match from "../services/challonge.js";
+import { checkAndFinalizeExternalVeto } from "./externalveto.js";
 
 class SeriesFlowService {
   static async OnSeriesResult(event: Get5_OnSeriesResult, res: Response) {
@@ -212,6 +213,7 @@ class SeriesFlowService {
         event.map_name,
         event.team
       );
+      checkAndFinalizeExternalVeto(event.matchid);
       return res.status(200).send({ message: "Success" });
     } catch (error: unknown) {
       console.error(error);

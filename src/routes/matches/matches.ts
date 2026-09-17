@@ -22,6 +22,8 @@ import { validateMapsAgainstSeason, getSeasonMapNames } from "../../utility/mapP
 
 import GameServer from "../../utility/serverrcon.js";
 
+import { pushMatchConfigToServer } from "../../services/externalveto.js";
+
 import config from "config";
 
 import GlobalEmitter from "../../utility/emitter.js";
@@ -1557,6 +1559,8 @@ router.post("/", Utils.ensureAuthenticated, async (req, res, next) => {
       max_maps: req.body[0].max_maps,
       title: req.body[0].title,
       skip_veto: skipVeto,
+      external_veto:
+        req.body[0].external_veto == null ? false : req.body[0].external_veto,
       veto_first: req.body[0].veto_first,
       veto_mappool: req.body[0].veto_mappool,
       side_type:
@@ -1621,33 +1625,20 @@ router.post("/", Utils.ensureAuthenticated, async (req, res, next) => {
       }
     }
     if (!req.body[0].ignore_server) {
-      let ourServerSql: string =
-        "SELECT rcon_password, ip_string, port FROM game_server WHERE id=?";
-      const serveInfo: RowDataPacket[] = await db.query(ourServerSql, [req.body[0].server_id]);
-      const newServer: GameServer = new GameServer(
-        serveInfo[0].ip_string,
-        serveInfo[0].port,
-        serveInfo[0].rcon_password
-      );
-      if (
-        (await newServer.isServerAlive()) &&
-        (await newServer.isGet5Available())
-      ) {
+      if (req.body[0].external_veto) {
+        // The veto happens outside of this server (a bot or a separate veto
+        // server posting to /vetoes and /vetosides) - just reserve the
+        // server now. checkAndFinalizeExternalVeto() pushes the real config
+        // once that veto records its final map.
         sql = "UPDATE game_server SET in_use = 1 WHERE id = ?";
         await db.query(sql, [req.body[0].server_id]);
-
-        sql = "UPDATE `match` SET plugin_version = ? WHERE id = ?";
-        let get5Version: string = await newServer.getGet5Version();
-        await db.query(sql, [get5Version, insertMatch.insertId]);
-        if (
-          !(await newServer.prepareGet5Match(
-            config.get("server.apiURL") +
-              "/matches/" +
-              insertMatch.insertId +
-              "/config",
-            apiKey
-          ))
-        ) {
+      } else {
+        const pushResult = await pushMatchConfigToServer(
+          insertMatch.insertId,
+          req.body[0].server_id,
+          apiKey
+        );
+        if (pushResult.attempted && !pushResult.success) {
           // Delete the match as it does not belong in the database.
           sql = "DELETE FROM match_spectator WHERE match_id = ?";
           await db.query(sql, [insertMatch.insertId]);

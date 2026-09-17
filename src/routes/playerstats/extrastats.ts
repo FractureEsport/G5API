@@ -334,6 +334,64 @@ import { Response } from "express-serve-static-core";
 /**
  * @swagger
  *
+ * /playerstatsextra/season/:season_id:
+ *   get:
+ *     description: Extra stats for every player across an entire season.
+ *     produces:
+ *       - application/json
+ *     parameters:
+ *       - name: season_id
+ *         required: true
+ *         schema:
+ *            type: string
+ *     tags:
+ *       - playerstats
+ *     responses:
+ *       200:
+ *         description: Extra stats for every match in the season.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 extrastats:
+ *                   type: array
+ *                   items:
+ *                     $ref: '#/components/schemas/PlayerStatsExtras'
+ *       404:
+ *         $ref: '#/components/responses/NotFound'
+ *       500:
+ *         $ref: '#/components/responses/Error'
+ */
+ router.get("/season/:season_id", async (req, res, next) => {
+    try {
+      let seasonID: string = req.params.season_id;
+      let matchSql: string =
+        "SELECT id FROM `match` WHERE cancelled = 0 AND season_id = ?";
+      const matches: RowDataPacket[] = await db.query(matchSql, [seasonID]);
+      if (!matches.length) {
+        res.status(404).json({ message: "No stats found for season " + seasonID });
+        return;
+      }
+      let extraSql: string =
+        "SELECT * FROM player_stat_extras WHERE match_id IN (?)";
+      const extrastats: RowDataPacket[] = await db.query(extraSql, [
+        matches.map((m) => m.id)
+      ]);
+      if (!extrastats.length) {
+        res.status(404).json({ message: "No additional stats found for season " + seasonID });
+        return;
+      }
+      res.json({ extrastats });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ message: (err as Error).toString() });
+    }
+});
+
+/**
+ * @swagger
+ *
  * /playerstatsextras/match/:match_id:
  *   get:
  *     description: Extra player stats from a given match in the system.
