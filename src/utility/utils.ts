@@ -230,6 +230,18 @@ static async getRatingFromSteamId(steamId: string): Promise<number | null> {
     else return false;
   }
 
+  /** Checks if a user has the cast (broadcaster) role in the system during their session.
+   * @function
+   * @memberof module:utils
+   * @inner
+   * @name castCheck
+   * @param {user} user - the users session object.
+   */
+  static castCheck(user: User) {
+    if (user) return user.cast === 1 || user.cast === true ? true : false;
+    else return false;
+  }
+
   /** Converts a Steam ID to Steam64.
    * @function
    * @memberof module:utils

@@ -596,6 +596,231 @@ router.get("/match/:match_id", async (req, res, next) => {
   }
 });
 
+const LIVE_STAT_FIELDS =
+  "kills, deaths, assists, roundsplayed, headshot_kills, " +
+  "damage, util_damage, flashbang_assists, enemies_flashed, " +
+  "bomb_plants, bomb_defuses, " +
+  "v1, v2, v3, v4, v5, k1, k2, k3, k4, k5, " +
+  "kast, mvp, contribution_score";
+
+/**
+ * Builds the SELECT fields/filter/GROUP BY needed to report live match stats.
+ * When a map is currently in progress, per-map rows are returned as-is.
+ * When no map is in progress (between maps, or before the first one goes
+ * live), the whole match's rows are aggregated instead of arbitrarily
+ * picking a single map's row.
+ */
+function buildLiveStatFields(currentMap: RowDataPacket | null) {
+  if (currentMap) {
+    return {
+      fields: LIVE_STAT_FIELDS,
+      mapFilter: "AND map_id = ?",
+      mapParam: [currentMap.id],
+      groupBy: ""
+    };
+  }
+  const aggFields = LIVE_STAT_FIELDS.split(",")
+    .map((f) => f.trim())
+    .map((f) => `SUM(${f}) AS ${f}`)
+    .join(", ");
+  return {
+    fields: aggFields,
+    mapFilter: "",
+    mapParam: [] as number[],
+    groupBy: "GROUP BY steam_id, name, team_id"
+  };
+}
+
+/**
+ * @swagger
+ *
+ * /playerstats/{steam_id}/live:
+ *   get:
+ *     description: Get the current live match stats for a given Steam ID (player stats + team stats), for OBS overlays.
+ *     produces:
+ *       - application/json
+ *     parameters:
+ *       - name: steam_id
+ *         description: The steam ID of the user
+ *         required: true
+ *         schema:
+ *          type: string
+ *     tags:
+ *       - playerstats
+ *     responses:
+ *       200:
+ *         description: Live match info with player and team aggregated stats.
+ *       404:
+ *         $ref: '#/components/responses/NotFound'
+ *       500:
+ *         $ref: '#/components/responses/Error'
+ */
+router.get("/:steam_id/live", async (req, res, next) => {
+  try {
+    const steamId: string = req.params.steam_id;
+
+    // Find the current live match for this player.
+    const liveMatchSql: string =
+      "SELECT m.id, m.team1_id, m.team2_id, m.team1_string, m.team2_string, " +
+      "m.team1_series_score, m.team2_series_score, " +
+      "m.max_maps, m.title, m.season_id, m.start_time, ps.team_id as player_team_id " +
+      "FROM `match` m " +
+      "JOIN player_stats ps ON ps.match_id = m.id " +
+      "WHERE ps.steam_id = ? " +
+      "AND m.end_time IS NULL " +
+      "AND (m.cancelled = 0 OR m.cancelled IS NULL) " +
+      "ORDER BY m.id DESC LIMIT 1";
+    const liveMatches: RowDataPacket[] = await db.query(liveMatchSql, [steamId]);
+
+    if (!liveMatches.length) {
+      res.status(404).json({ message: "No live match found for player " + steamId });
+      return;
+    }
+
+    const match = liveMatches[0];
+    const matchId: number = match.id;
+    const playerTeamId: number = match.player_team_id;
+
+    // Current map (most recent map_stats row with no end_time).
+    const currentMapSql: string =
+      "SELECT id, map_number, map_name, team1_score, team2_score " +
+      "FROM map_stats WHERE match_id = ? AND end_time IS NULL " +
+      "ORDER BY map_number DESC LIMIT 1";
+    const currentMapRows: RowDataPacket[] = await db.query(currentMapSql, [matchId]);
+    const currentMap = currentMapRows[0] || null;
+
+    const { fields, mapFilter, mapParam, groupBy } = buildLiveStatFields(currentMap);
+
+    const playerStatSql: string =
+      `SELECT steam_id, name, team_id, ${fields} ` +
+      `FROM player_stats WHERE match_id = ? AND steam_id = ? ${mapFilter} ${groupBy}`;
+    const playerStats: RowDataPacket[] = await db.query(
+      playerStatSql,
+      [matchId, steamId, ...mapParam]
+    );
+
+    const teamStatSql: string =
+      `SELECT steam_id, name, team_id, ${fields} ` +
+      `FROM player_stats WHERE match_id = ? AND team_id = ? ${mapFilter} ${groupBy}`;
+    const teamStats: RowDataPacket[] = await db.query(
+      teamStatSql,
+      [matchId, playerTeamId, ...mapParam]
+    );
+
+    res.json({
+      match,
+      currentMap,
+      playerStats: playerStats[0] || null,
+      teamStats
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: (err as Error).toString() });
+  }
+});
+
+/**
+ * @swagger
+ *
+ * /playerstats/{steam_id}/live/stream:
+ *   get:
+ *     description: SSE stream for the current live match stats of a given Steam ID.
+ *     produces:
+ *       - text/event-stream
+ *     parameters:
+ *       - name: steam_id
+ *         required: true
+ *         schema:
+ *          type: string
+ *     tags:
+ *       - playerstats
+ */
+router.get("/:steam_id/live/stream", async (req, res, next) => {
+  try {
+    const steamId: string = req.params.steam_id;
+
+    const liveMatchSql: string =
+      "SELECT m.id, m.team1_id, m.team2_id, m.team1_string, m.team2_string, " +
+      "m.team1_series_score, m.team2_series_score, " +
+      "m.max_maps, m.title, m.season_id, m.start_time, m.end_time, ps.team_id as player_team_id " +
+      "FROM `match` m " +
+      "JOIN player_stats ps ON ps.match_id = m.id " +
+      "WHERE ps.steam_id = ? " +
+      "AND m.end_time IS NULL " +
+      "AND (m.cancelled = 0 OR m.cancelled IS NULL) " +
+      "ORDER BY m.id DESC LIMIT 1";
+
+    const currentMapSql: string =
+      "SELECT id, map_number, map_name, team1_score, team2_score " +
+      "FROM map_stats WHERE match_id = ? AND end_time IS NULL " +
+      "ORDER BY map_number DESC LIMIT 1";
+
+    const buildPayload = async (): Promise<object> => {
+      const liveMatches: RowDataPacket[] = await db.query(liveMatchSql, [steamId]);
+      if (!liveMatches.length) return { match: null, currentMap: null, playerStats: null, teamStats: [] };
+
+      const match = liveMatches[0];
+      const matchId: number = match.id;
+      const playerTeamId: number = match.player_team_id;
+
+      const currentMapRows: RowDataPacket[] = await db.query(currentMapSql, [matchId]);
+      const currentMap = currentMapRows[0] || null;
+
+      const { fields, mapFilter, mapParam, groupBy } = buildLiveStatFields(currentMap);
+
+      const playerStats: RowDataPacket[] = await db.query(
+        `SELECT steam_id, name, team_id, ${fields} FROM player_stats WHERE match_id = ? AND steam_id = ? ${mapFilter} ${groupBy}`,
+        [matchId, steamId, ...mapParam]
+      );
+      const teamStats: RowDataPacket[] = await db.query(
+        `SELECT steam_id, name, team_id, ${fields} FROM player_stats WHERE match_id = ? AND team_id = ? ${mapFilter} ${groupBy}`,
+        [matchId, playerTeamId, ...mapParam]
+      );
+
+      return { match, currentMap, playerStats: playerStats[0] || null, teamStats };
+    };
+
+    res.set({
+      "Cache-Control": "no-cache",
+      "Connection": "keep-alive",
+      "Content-Type": "text/event-stream",
+      "X-Accel-Buffering": "no"
+    });
+    res.flushHeaders();
+
+    const sendPayload = async (): Promise<void> => {
+      const payload = await buildPayload();
+      res.write(`event: livestats\ndata: ${JSON.stringify(payload)}\n\n`);
+    };
+
+    await sendPayload();
+
+    const onUpdate: (() => Promise<void>) = async () => {
+      await sendPayload();
+    };
+
+    GlobalEmitter.on("playerStatsUpdate", onUpdate);
+    GlobalEmitter.on("matchUpdate", onUpdate);
+    GlobalEmitter.on("mapStatUpdate", onUpdate);
+
+    req.on("close", () => {
+      GlobalEmitter.removeListener("playerStatsUpdate", onUpdate);
+      GlobalEmitter.removeListener("matchUpdate", onUpdate);
+      GlobalEmitter.removeListener("mapStatUpdate", onUpdate);
+      res.end();
+    });
+    req.on("disconnect", () => {
+      GlobalEmitter.removeListener("playerStatsUpdate", onUpdate);
+      GlobalEmitter.removeListener("matchUpdate", onUpdate);
+      GlobalEmitter.removeListener("mapStatUpdate", onUpdate);
+      res.end();
+    });
+  } catch (err) {
+    console.error((err as Error).toString());
+    res.status(500).write(`event: error\ndata: ${(err as Error).toString()}\n\n`);
+    res.end();
+  }
+});
 
 /**
  * @swagger

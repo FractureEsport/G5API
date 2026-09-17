@@ -64,8 +64,6 @@ services:
       - SQLPORT=3306
       - DATABASE=get5
       - SQLHOST=get5db
-      - ADMINS=
-      - SUPERADMINS=
       - REDISURL=redis://:super_secure_password_change_me@redis:6379
       - REDISTTL=86400
       - USEREDIS=true

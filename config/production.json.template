@@ -28,12 +28,6 @@
     "port": $SQLPORT,
     "connectionLimit": 15
   },
-  "admins": {
-    "steam_ids": "$ADMINS"
-  },
-  "super_admins": {
-    "steam_ids": "$SUPERADMINS"
-  },
   "defaultMaps": [
     { "map_name": "de_inferno", "map_display_name": "Inferno" },
     { "map_name": "de_ancient", "map_display_name": "Ancient" },

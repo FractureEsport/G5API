@@ -15,6 +15,7 @@ import GlobalEmitter from "../utility/emitter.js";
 import { RowDataPacket } from "mysql2";
 import { AccessMessage } from "../types/mapstats/AccessMessage.js";
 import { VetoObject } from "../types/vetoes/VetoObject.js";
+import { checkAndFinalizeExternalVeto } from "../services/externalveto.js";
 
 /**
  * @swagger
@@ -286,6 +287,9 @@ router.post("/", Utils.ensureAuthenticated, async (req, res, next) => {
         id: vetoId.insertId,
       });
       GlobalEmitter.emit("vetoUpdate");
+      if (insertStmt.pick_or_veto === "pick") {
+        checkAndFinalizeExternalVeto(req.body[0].match_id);
+      }
     } catch (err) {
       console.error(err);
       res.status(500).json({ message: (err as Error).toString() });

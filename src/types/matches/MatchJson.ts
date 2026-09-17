@@ -30,4 +30,5 @@ export interface MatchJSON {
     wingman: boolean,
     num_maps?: number,
     map_sides?: string,
+    maps_display_names?: Record<string, string>,
 }

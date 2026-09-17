@@ -7,6 +7,7 @@ import { createClient } from "redis";
 import { db } from "./db.js";
 import GameServer from "../utility/serverrcon.js";
 import GlobalEmitter from "../utility/emitter.js";
+import { getSeasonMapPool } from "../utility/mapPool.js";
 import { generate } from "randomstring";
 import {
   createAndStartServer,
@@ -92,25 +93,23 @@ export class QueueService {
     const meta = await getQueueMetaOrThrow(slug);
     const apiKey = generate({ length: 24, capitalization: "uppercase" });
 
-    let mapPool: string[] = [];
+    // Queue/PUG matches never source their map pool from a player's personal
+    // map_list - only from the configured queue season's pool (if one is set
+    // via `server.queueSeasonId`) or the instance-wide defaults, otherwise.
+    const queueSeasonId: number | null = config.has("server.queueSeasonId")
+      ? (config.get("server.queueSeasonId") as number)
+      : null;
     let ownerUserId: number | null = await getUserIdFromMetaSlug(slug);
-    try {
-      if (ownerUserId && ownerUserId > 0) {
-        const rows: RowDataPacket[] = await db.query("SELECT map_name FROM map_list WHERE user_id = ? ORDER BY id", [ownerUserId]);
-        if (rows.length) {
-          mapPool = rows.map((r: any) => r.map_name).filter(Boolean);
-        }
-      }
-    } catch (err) {
-      mapPool = [];
-    }
-    console.log("Map pool for user", ownerUserId, ":", mapPool);
+    let mapPool: string[] | null = queueSeasonId
+      ? await getSeasonMapPool(queueSeasonId)
+      : null;
     if (!mapPool || mapPool.length === 0) {
       mapPool = (config.get("defaultMaps") as { map_name: string }[]).map(m => m.map_name);
     }
 
     const baseMatch: any = {
       user_id: ownerUserId || 0,
+      season_id: queueSeasonId || null,
       team1_id: teamIds[0] || null,
       team2_id: teamIds[1] || null,
       start_time: new Date(),

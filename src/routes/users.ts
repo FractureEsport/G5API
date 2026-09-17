@@ -102,9 +102,21 @@ import { UserObject } from "../types/users/UserObject.js";
  */
 router.get("/", async (req, res) => {
   try {
-    let sql: string =
-      "SELECT id, name, steam_id, small_image, medium_image, large_image FROM user";
-    const users: RowDataPacket[] = await db.query(sql);
+    const search = req.query.search as string | undefined;
+    // Role flags (admin/super_admin/cast) are only included for a
+    // super admin's own request - other callers (e.g. a public user
+    // picker) keep getting the same plain profile fields as before.
+    const includeRoles = !!(req.user && Utils.superAdminCheck(req.user));
+    let sql: string = includeRoles
+      ? "SELECT id, name, steam_id, small_image, medium_image, large_image, admin, super_admin, cast FROM user"
+      : "SELECT id, name, steam_id, small_image, medium_image, large_image FROM user";
+    let params: string[] = [];
+    if (search) {
+      sql += " WHERE name LIKE ? OR steam_id LIKE ?";
+      params = [`%${search}%`, `%${search}%`];
+    }
+    sql += " ORDER BY name ASC";
+    const users: RowDataPacket[] = await db.query(sql, params);
     res.json({ users });
   } catch (err) {
     console.error(err);
@@ -151,7 +163,7 @@ router.get("/:user_id", async (req, res, next) => {
       sql = "SELECT * FROM user WHERE id = ? OR steam_id = ?";
     } else {
       sql =
-        "SELECT id, name, steam_id, small_image, medium_image, large_image, admin, super_admin FROM user where id = ? OR steam_id = ?";
+        "SELECT id, name, steam_id, small_image, medium_image, large_image, admin, super_admin, cast FROM user where id = ? OR steam_id = ?";
     }
 
     let user: any = await db.query(sql, [userOrSteamID, userOrSteamID]);
@@ -290,7 +302,7 @@ router.post("/", Utils.ensureAuthenticated, async (req, res, next) => {
 router.put("/", Utils.ensureAuthenticated, async (req, res, next) => {
   try {
     let userToBeUpdated: RowDataPacket[] = await db.query(
-      "SELECT id, name, admin, super_admin, username, password FROM user WHERE id = ? OR steam_id = ?",
+      "SELECT id, name, admin, super_admin, cast, username, password FROM user WHERE id = ? OR steam_id = ?",
       [req.body[0].id, req.body[0].steam_id]
     );
     let isAdmin: number =
@@ -299,6 +311,8 @@ router.put("/", Utils.ensureAuthenticated, async (req, res, next) => {
       req.body[0].super_admin == null
         ? userToBeUpdated[0].super_admin
         : req.body[0].super_admin;
+    let isCast: number =
+      req.body[0].cast == null ? userToBeUpdated[0].cast : req.body[0].cast;
     let displayName: string =
       req.body[0].name === null ? userToBeUpdated[0].name : req.body[0].name;
     let smallImage: string = req.body[0].small_image;
@@ -326,6 +340,7 @@ router.put("/", Utils.ensureAuthenticated, async (req, res, next) => {
       updateUser = {
         admin: isAdmin,
         super_admin: isSuperAdmin,
+        cast: isCast,
         name: displayName,
         small_image: smallImage,
         medium_image: mediumImage,
@@ -368,6 +383,7 @@ router.put("/", Utils.ensureAuthenticated, async (req, res, next) => {
       if (Utils.adminCheck(req.user)) {
         req.user.super_admin = isSuperAdmin;
         req.user.admin = isAdmin;
+        req.user.cast = isCast;
         req.login(req.user, (err) => {
           if (err) return next(new Error("Error updating user profile"));
         });

@@ -288,7 +288,7 @@ class ServerRcon {
       let get5Status = await this.execute("get5_web_available");
       if (get5Status.includes("Unknown command")) {
         let get5Version = await this.getGet5Version();
-        if (compare(get5Version, "0.13.1", ">=")) {
+        if (get5Version !== "unknown" && compare(get5Version, "0.13.1", ">=")) {
           return true;
         } else {
           console.log("Either get5, MatchZy, or PugSharp plugin is missing.");
@@ -397,6 +397,11 @@ class ServerRcon {
       }
       let loadMatchResponse: string;
       let get5Version = await this.getGet5Version();
+      if (get5Version === "unknown") {
+        throw new Error(
+          "Could not detect the Get5/MatchZy plugin version on the game server. Make sure CounterStrikeSharp and MatchZy (or Get5/PugSharp) are installed and loaded on that server."
+        );
+      }
       if (compare(get5Version, "0.13.1", ">=")) {
         loadMatchResponse = await this.execute(
           `get5_loadmatch_url "${get5URLString}" "Authorization" "${get5APIKeyString}"`

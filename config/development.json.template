@@ -28,12 +28,6 @@
     "port": 3306,
     "connectionLimit": 15
   },
-  "admins": {
-    "steam_ids": "admins,go,here"
-  },
-  "super_admins": {
-    "steam_ids": "super_admins,go,here"
-  },
   "defaultMaps": [
     { "map_name": "de_inferno", "map_display_name": "Inferno" },
     { "map_name": "de_ancient", "map_display_name": "Ancient" },
