@@ -99,9 +99,11 @@ describe("Test the game server routes.", () => {
       .get("/servers/1")
       .expect("Content-Type", /json/)
       .expect(200)
-      // Test to decrypt the password, if it matches then we decrypt/encrypt properly!
+      // The API must never return the actual RCON password - only a one-way hash
+      // of it, so an owner can see a password is set without it being readable.
       .expect((result) => {
-        expect(result.body.server.rcon_password).toBe(password);
+        expect(result.body.server.rcon_password).not.toBe(password);
+        expect(result.body.server.rcon_password).toMatch(/^[a-f0-9]{64}$/);
       });
   });
   it("Request the information of all users servers.", () => {

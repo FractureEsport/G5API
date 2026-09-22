@@ -105,9 +105,13 @@ router.get("/", Utils.ensureAuthenticated, async (req, res, next) => {
         "SELECT gs.id, gs.in_use, gs.display_name, usr.name, gs.public_server, gs.flag FROM game_server gs, user usr WHERE gs.public_server=1 AND usr.id = gs.user_id";
     }
     let servers: RowDataPacket[] = await db.query(sql);
+    // Never return the actual RCON password over the API - a one-way hash still lets
+    // an admin see a password is set (or spot two servers sharing one) without it
+    // being readable here. G5API itself still decrypts the stored value internally
+    // whenever it opens a real RCON connection.
     if (req.user && Utils.superAdminCheck(req.user)) {
       for (let serverRow of servers) {
-        serverRow.rcon_password = Utils.decrypt(serverRow.rcon_password);
+        serverRow.rcon_password = Utils.hash(Utils.decrypt(serverRow.rcon_password));
       }
     }
     res.json({ servers });
@@ -204,7 +208,7 @@ router.get("/available", Utils.ensureAuthenticated, async (req, res, next) => {
     else servers = await db.query(sql);
     if (req.user && Utils.superAdminCheck(req.user)) {
       for (let serverRow of servers) {
-        serverRow.rcon_password = Utils.decrypt(serverRow.rcon_password);
+        serverRow.rcon_password = Utils.hash(Utils.decrypt(serverRow.rcon_password));
       }
     }
     res.json({ servers });
@@ -248,7 +252,7 @@ router.get("/myservers", Utils.ensureAuthenticated, async (req, res, next) => {
       "SELECT gs.id, gs.in_use, gs.ip_string, gs.port, gs.rcon_password, gs.display_name, gs.public_server, usr.name, usr.id as user_id, gs.flag, gs.gotv_port FROM game_server gs, user usr WHERE usr.id = gs.user_id AND usr.id=?";
     let servers: RowDataPacket[] = await db.query(sql, [req.user?.id]);
     for (let serverRow of servers) {
-      serverRow.rcon_password = Utils.decrypt(serverRow.rcon_password);
+      serverRow.rcon_password = Utils.hash(Utils.decrypt(serverRow.rcon_password));
     }
     res.json({ servers });
   } catch (err) {
@@ -318,7 +322,7 @@ router.get("/:server_id", Utils.ensureAuthenticated, async (req, res, next) => {
         res.status(404).json({ message: "Server not found." });
       }
     } else {
-      server[0].rcon_password = Utils.decrypt(server[0].rcon_password);
+      server[0].rcon_password = Utils.hash(Utils.decrypt(server[0].rcon_password));
       server = JSON.parse(JSON.stringify(server[0]));
       res.json({ server });
     }
