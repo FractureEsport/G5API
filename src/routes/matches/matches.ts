@@ -18,7 +18,7 @@ import { generate } from "randomstring";
 
 import Utils from "../../utility/utils.js";
 
-import { validateMapsAgainstSeason, getSeasonMapNames } from "../../utility/mapPool.js";
+import { validateMapsAgainstSeason, getSeasonMapNames, getUserMapNames } from "../../utility/mapPool.js";
 
 import GameServer from "../../utility/serverrcon.js";
 
@@ -569,7 +569,7 @@ router.get("/cast/stream", Utils.ensureAuthenticated, async (req, res) => {
 
         const activeMatchSql = `
           SELECT m.id, m.team1_string, m.team2_string, m.team1_series_score, m.team2_series_score,
-            m.max_maps, m.start_time, m.season_id,
+            m.max_maps, m.start_time, m.season_id, m.user_id,
             gs.ip_string, gs.ip_cast, gs.port, gs.gotv_port,
             ms.map_name, ms.team1_score, ms.team2_score, ms.map_number
           FROM \`match\` m
@@ -588,7 +588,7 @@ router.get("/cast/stream", Utils.ensureAuthenticated, async (req, res) => {
 
         const finishedMatchSql = `
           SELECT m.id, m.team1_string, m.team2_string, m.team1_series_score, m.team2_series_score,
-            m.max_maps, m.end_time, m.season_id,
+            m.max_maps, m.end_time, m.season_id, m.user_id,
             ms.map_name, ms.team1_score, ms.team2_score, ms.map_number
           FROM \`match\` m
           LEFT JOIN map_stats ms ON ms.match_id = m.id
@@ -626,6 +626,21 @@ router.get("/cast/stream", Utils.ensureAuthenticated, async (req, res) => {
           })
         );
 
+        // Same, but from the match creator's personal map list - the fallback a
+        // non-season match uses when picking maps, so a Workshop map added there
+        // still resolves to its display name here instead of "Workshop #<id>".
+        const userIds = [...new Set(
+          [...activeRows, ...finishedRows]
+            .map((r) => r.user_id)
+            .filter((id) => id != null)
+        )];
+        const userMapNamesById: { [key: number]: Record<string, string> } = {};
+        await Promise.all(
+          userIds.map(async (userId) => {
+            userMapNamesById[userId] = await getUserMapNames(userId);
+          })
+        );
+
         const groupMatchMaps = (rows: RowDataPacket[], withVeto = false) => {
           const matchMap: { [key: number]: any } = {};
           for (const row of rows) {
@@ -643,7 +658,10 @@ router.get("/cast/stream", Utils.ensureAuthenticated, async (req, res) => {
                 ip_cast: row.ip_cast,
                 port: row.port,
                 gotv_port: row.gotv_port,
-                map_display_names: row.season_id != null ? seasonMapNamesById[row.season_id] : {},
+                map_display_names: {
+                  ...(row.user_id != null ? userMapNamesById[row.user_id] : {}),
+                  ...(row.season_id != null ? seasonMapNamesById[row.season_id] : {})
+                },
                 maps: []
               };
             }

@@ -9,7 +9,7 @@ import pkg from 'aes-js';
 const { utils, ModeOfOperation } = pkg;
 
 /** Crypto for assigning random  */
-import { randomBytes } from "crypto";
+import { randomBytes, createHash } from "crypto";
 
 /** Config to get database key.
  * @const
@@ -167,6 +167,20 @@ static async getRatingFromSteamId(steamId: string): Promise<number | null> {
       throw err;
     }
   }
+  /** One-way SHA-256 hash, hex-encoded. Used where a secret (e.g. a server's RCON
+   * password) must never be sent back out over the API in a readable form - unlike
+   * encrypt()/decrypt(), this can't be reversed to recover the original value.
+   * @name hash
+   * @function
+   * @inner
+   * @memberof module:utils
+   * @param {string} source - The value to hash.
+   */
+  static hash(source: string | null | undefined) {
+    if (source === null || source === undefined) return null;
+    return createHash("sha256").update(source).digest("hex");
+  }
+
   /** Ensures the user was authenticated through steam OAuth.
    * @function
    * @memberof module:utils

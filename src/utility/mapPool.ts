@@ -92,6 +92,27 @@ export async function getSeasonMapNames(
 }
 
 /**
+ * Returns a user's personal map-list display-name overrides (technical id -> display
+ * name), the same names shown when that user builds a non-season match. Used as the
+ * fallback source for a match that isn't tied to a season (which has no map_pool_names
+ * cvar to consult), so Workshop maps still get a readable name instead of "Workshop #id".
+ */
+export async function getUserMapNames(
+  userId: number | null | undefined
+): Promise<Record<string, string>> {
+  if (!userId) return {};
+  const rows: RowDataPacket[] = await db.query(
+    "SELECT map_name, map_display_name FROM map_list WHERE user_id = ? AND map_display_name IS NOT NULL",
+    [userId]
+  );
+  const names: Record<string, string> = {};
+  for (const row of rows) {
+    if (row.map_name && row.map_display_name) names[row.map_name] = row.map_display_name;
+  }
+  return names;
+}
+
+/**
  * Validates that every submitted map id belongs to the season's configured map pool.
  * Returns null when valid (including when the season has no configured pool - nothing
  * to enforce), or an error message naming the first invalid map otherwise.
