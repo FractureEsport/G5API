@@ -803,6 +803,90 @@ router.get("/:match_id", async (req, res, next) => {
 /**
  * @swagger
  *
+ * /matches/:match_id/summary:
+ *   get:
+ *     description: Full public summary of a match - match info with team
+ *       names/logos and season, every map with its per-player stats
+ *       (including HLTV rating), and the veto history.
+ *     produces:
+ *       - application/json
+ *     parameters:
+ *       - name: match_id
+ *         required: true
+ *         schema:
+ *          type: integer
+ *     tags:
+ *       - matches
+ *     responses:
+ *       200:
+ *         description: Match summary
+ *       404:
+ *         $ref: '#/components/responses/NotFound'
+ *       500:
+ *         $ref: '#/components/responses/Error'
+ */
+router.get("/:match_id/summary", async (req, res, next) => {
+  try {
+    const matchID: number = parseInt(req.params.match_id);
+    const matches: RowDataPacket[] = await db.query(
+      `SELECT m.id, m.start_time, m.end_time, m.team1_score, m.team2_score,
+        m.team1_series_score, m.team2_series_score, m.cancelled, m.forfeit,
+        m.max_maps, m.veto_mappool,
+        m.team1_id, COALESCE(t1.name, m.team1_string) AS team1_name, t1.logo AS team1_logo,
+        m.team2_id, COALESCE(t2.name, m.team2_string) AS team2_name, t2.logo AS team2_logo,
+        m.winner AS winner_id, m.season_id, s.name AS season_name
+      FROM \`match\` m
+      LEFT JOIN team t1 ON t1.id = m.team1_id
+      LEFT JOIN team t2 ON t2.id = m.team2_id
+      LEFT JOIN season s ON s.id = m.season_id
+      WHERE m.id = ?`,
+      [matchID]
+    );
+    if (!matches.length) {
+      res.status(404).json({ message: "No match found." });
+      return;
+    }
+    const mapRows: RowDataPacket[] = await db.query(
+      `SELECT id, map_number, map_name, team1_score, team1_score_ct, team1_score_t,
+        team2_score, team2_score_ct, team2_score_t, team1_first_side,
+        start_time, end_time, demoFile
+      FROM map_stats WHERE match_id = ? ORDER BY map_number`,
+      [matchID]
+    );
+    const playerRows: RowDataPacket[] = await db.query(
+      `SELECT map_id, steam_id, name, kills, deaths, assists, headshot_kills,
+        damage, roundsplayed, k1, k2, k3, k4, k5, v1, v2, v3, v4, v5,
+        firstkill_ct, firstkill_t, firstdeath_ct, firstdeath_t,
+        bomb_plants, bomb_defuses, kast, team_id, team_name
+      FROM player_stats WHERE match_id = ?`,
+      [matchID]
+    );
+    const maps = mapRows.map((map) => ({
+      ...map,
+      players: playerRows
+        .filter((p) => p.map_id === map.id)
+        .map((p) => ({
+          ...p,
+          rating: Utils.getRating(
+            p.kills, p.roundsplayed, p.deaths, p.k1, p.k2, p.k3, p.k4, p.k5
+          )
+        }))
+        .sort((a, b) => b.rating - a.rating)
+    }));
+    const vetos: RowDataPacket[] = await db.query(
+      "SELECT id, team_name, map, pick_or_veto FROM veto WHERE match_id = ? ORDER BY id",
+      [matchID]
+    );
+    res.json({ match: matches[0], maps, vetos });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: (err as Error).toString() });
+  }
+});
+
+/**
+ * @swagger
+ *
  * /matches/:match_id/stream:
  *   get:
  *     description: Returns an event stream of a specified matches info.
