@@ -347,6 +347,111 @@ router.get("/:season_id", async (req, res, next) => {
 /**
  * @swagger
  *
+ * /seasons/:season_id/summary:
+ *   get:
+ *     description: Full public summary of a season - brackets, every match
+ *       with team names/logos, winner and first-map score, plus aggregated
+ *       player stats (with HLTV rating) across all non-cancelled matches.
+ *     produces:
+ *       - application/json
+ *     parameters:
+ *       - name: season_id
+ *         required: true
+ *         schema:
+ *          type: integer
+ *       - name: min_maps
+ *         in: query
+ *         required: false
+ *         description: Only list players with at least this many maps played.
+ *         schema:
+ *          type: integer
+ *     tags:
+ *       - seasons
+ *     responses:
+ *       200:
+ *         description: Season summary
+ *       404:
+ *         $ref: '#/components/responses/NotFound'
+ *       500:
+ *         $ref: '#/components/responses/Error'
+ */
+router.get("/:season_id/summary", async (req, res, next) => {
+  try {
+    const seasonID: number = parseInt(req.params.season_id);
+    const minMaps: number = parseInt(String(req.query.min_maps ?? "0")) || 0;
+    const seasons: RowDataPacket[] = await db.query(
+      "SELECT id, name, start_date, end_date, challonge_url FROM season WHERE id = ?",
+      [seasonID]
+    );
+    if (!seasons.length) {
+      res.status(404).json({ message: "Season not found." });
+      return;
+    }
+    const challongeSlug: string | null = seasons[0].challonge_url ?? null;
+    const brackets = challongeSlug
+      ? [{ challonge_slug: challongeSlug, label: "Main", display_order: 0 }]
+      : [];
+
+    const matches: RowDataPacket[] = await db.query(
+      `SELECT m.id, m.start_time, m.end_time, m.team1_score, m.team2_score,
+        m.team1_series_score, m.team2_series_score, m.cancelled, m.forfeit,
+        m.max_maps, ? AS challonge_slug,
+        m.team1_id, COALESCE(t1.name, m.team1_string) AS team1_name, t1.logo AS team1_logo,
+        m.team2_id, COALESCE(t2.name, m.team2_string) AS team2_name, t2.logo AS team2_logo,
+        m.winner AS winner_id,
+        ms.team1_score AS map1_team1_score, ms.team2_score AS map1_team2_score
+      FROM \`match\` m
+      LEFT JOIN team t1 ON t1.id = m.team1_id
+      LEFT JOIN team t2 ON t2.id = m.team2_id
+      LEFT JOIN map_stats ms ON ms.match_id = m.id AND ms.map_number = 0
+      WHERE m.season_id = ?
+      ORDER BY m.start_time DESC, m.id DESC`,
+      [challongeSlug, seasonID]
+    );
+
+    const playerRows: RowDataPacket[] = await db.query(
+      `SELECT ps.steam_id, MAX(ps.name) AS name,
+        SUM(ps.kills) AS kills, SUM(ps.deaths) AS deaths, SUM(ps.assists) AS assists,
+        SUM(ps.headshot_kills) AS headshot_kills, SUM(ps.damage) AS damage,
+        SUM(ps.roundsplayed) AS roundsplayed,
+        SUM(ps.k1) AS k1, SUM(ps.k2) AS k2, SUM(ps.k3) AS k3, SUM(ps.k4) AS k4, SUM(ps.k5) AS k5,
+        SUM(ps.v1) AS v1, SUM(ps.v2) AS v2, SUM(ps.v3) AS v3, SUM(ps.v4) AS v4, SUM(ps.v5) AS v5,
+        SUM(ps.kast) AS kast, ROUND(AVG(ps.kast)) AS kast_avg,
+        COUNT(DISTINCT ps.map_id) AS maps_played
+      FROM player_stats ps
+      JOIN \`match\` m ON m.id = ps.match_id
+      WHERE m.season_id = ? AND m.cancelled = 0
+      GROUP BY ps.steam_id
+      HAVING maps_played >= ?`,
+      [seasonID, minMaps]
+    );
+    const players = playerRows
+      .map((p) => ({
+        ...p,
+        rating: Utils.getRating(
+          parseFloat(p.kills),
+          parseFloat(p.roundsplayed),
+          parseFloat(p.deaths),
+          parseFloat(p.k1),
+          parseFloat(p.k2),
+          parseFloat(p.k3),
+          parseFloat(p.k4),
+          parseFloat(p.k5)
+        )
+      }))
+      .sort((a, b) => b.rating - a.rating);
+
+    const { challonge_url, ...season } = seasons[0];
+    res.json({ season, brackets, matches, players });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: (err as Error).toString() });
+  }
+});
+
+/**
+ * @swagger
+ *
  * /seasons:
  *   post:
  *     description: Create a new season.
