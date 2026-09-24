@@ -1249,6 +1249,22 @@ router.post(
             let rconResponse: string = await serverUpdate.restoreBackupFromURL(
               config.get("server.apiURL") + `/backups/${req.params.match_id}/${safeConfigName}`
             );
+            // End the match on the old server, if there was one, so it is
+            // freed up and does not keep reporting itself as in use.
+            if (matchServerId[0].server_id != null && matchServerId[0].server_id != newServerId) {
+              const oldServerInfo: RowDataPacket[] = await db.query(
+                "SELECT ip_string, port, rcon_password FROM game_server WHERE id=?",
+                [matchServerId[0].server_id]
+              );
+              if (oldServerInfo[0]) {
+                const oldServer: GameServer = new GameServer(
+                  oldServerInfo[0].ip_string,
+                  oldServerInfo[0].port,
+                  oldServerInfo[0].rcon_password
+                );
+                await oldServer.endGet5Match();
+              }
+            }
             // Point the match at the new server, and swap in_use flags between
             // the old and new servers (previously the query params here were
             // reversed, so server_id was never actually updated).
